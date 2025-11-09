@@ -1,0 +1,50 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum MessageStatus {
+  QUEUED
+  SENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+model User {
+  id        String    @id @default(uuid())
+  email     String?   @unique
+  createdAt DateTime  @default(now())
+  messages  Message[]
+}
+
+model Message {
+  id                String         @id @default(uuid())
+  userId            String
+  user              User           @relation(fields: [userId], references: [id])
+
+  toNumber          String
+  body              String
+
+  clientMessageId   String?        // for idempotency
+  providerMessageId String?        @unique
+
+  status            MessageStatus  @default(QUEUED)
+
+  queuedAt          DateTime       @default(now())
+  sendingAt         DateTime?
+  sentAt            DateTime?
+  deliveredAt       DateTime?
+  readAt            DateTime?
+
+  failedReason      String?
+
+  @@unique([userId, clientMessageId])
+  @@index([userId, queuedAt])
+  @@index([status])
+}

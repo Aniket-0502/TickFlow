@@ -1,39 +1,40 @@
-// src/queue/queue.module.ts
 import { Module } from '@nestjs/common';
-import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bullmq';
-
-import { PrismaModule } from '../prisma/prisma.module';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { QueueTestController } from './test.queue.controller';
 import { MessageProcessor } from './message.processor';
 
 @Module({
   imports: [
-    // use existing global ConfigModule but importing here is harmless and keeps this module standalone
     ConfigModule.forRoot({ isGlobal: true }),
-
-    // BullMQ connection via env, fallback to localhost
     BullModule.forRootAsync({
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
+      imports: [ConfigModule],
+      useFactory: (cfg: ConfigService) => ({
         connection: {
-          host: config.get<string>('REDIS_HOST', '127.0.0.1'),
-          port: parseInt(config.get<string>('REDIS_PORT', '6379'), 10),
-          // password: config.get<string>('REDIS_PASSWORD'), // uncomment if needed
-          // tls: ...                                  // if using managed TLS Redis
+          host: cfg.get<string>('REDIS_HOST', '127.0.0.1'),
+          port: Number(cfg.get<string>('REDIS_PORT', '6379')),
         },
       }),
+      inject: [ConfigService],
     }),
-
-    // Register our queue
-    BullModule.registerQueue({
+    BullModule.registerQueueAsync({
       name: 'messages',
+      imports: [ConfigModule],
+      useFactory: (cfg: ConfigService) => ({
+        defaultJobOptions: {
+          attempts: Number(cfg.get('JOB_ATTEMPTS') ?? 3),
+          backoff: {
+            type: 'exponential',
+            delay: Number(cfg.get('JOB_BACKOFF_MS') ?? 1000),
+          },
+          removeOnComplete: 50,
+          removeOnFail: false,
+        },
+      }),
+      inject: [ConfigService],
     }),
-
-    // Needed so MessageProcessor can inject PrismaService
-    PrismaModule,
   ],
-  controllers: [QueueTestController], // temporary test route
+  controllers: [QueueTestController],
   providers: [MessageProcessor],
   exports: [BullModule],
 })

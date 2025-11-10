@@ -1,8 +1,12 @@
-import { Injectable } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateMessageDto } from './dto/create-message.dto';
 import { InjectQueue } from '@nestjs/bullmq';
-import { Queue } from 'bullmq';
+import { Queue, JobsOptions } from 'bullmq';
 
 @Injectable()
 export class MessageService {
@@ -12,14 +16,14 @@ export class MessageService {
   ) {}
 
   async create(userId: string, dto: CreateMessageDto) {
-    // 1) Make sure the user exists (fixes P2003)
+    // Ensure user exists (dev convenience)
     await this.prisma.user.upsert({
       where: { id: userId },
       update: {},
       create: { id: userId },
     });
 
-    // 2) Idempotency
+    // Idempotency via clientMessageId
     if (dto.clientMessageId) {
       const existing = await this.prisma.message.findFirst({
         where: { userId, clientMessageId: dto.clientMessageId },
@@ -27,7 +31,6 @@ export class MessageService {
       if (existing) return existing;
     }
 
-    // 3) Create message
     const message = await this.prisma.message.create({
       data: {
         userId,
@@ -37,16 +40,12 @@ export class MessageService {
       },
     });
 
-    // 4) Enqueue with required payload (fixes undefined messageId in processor)
+    // Deduplicate API retries on the same message
+    const jobOpts: JobsOptions = { jobId: message.id };
     await this.messagesQueue.add(
       'send',
-      { messageId: message.id },
-      {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 500 },
-        removeOnComplete: true,
-        removeOnFail: false,
-      },
+      { messageId: message.id, userId },
+      jobOpts,
     );
 
     return message;
@@ -64,5 +63,72 @@ export class MessageService {
       skip,
       take: limit,
     });
+  }
+
+  /**
+   * Retry a FAILED message.
+   * - If the original BullMQ job still exists (since removeOnFail=false), call job.retry()
+   *   to avoid jobId dedupe issues.
+   * - If it does not exist (e.g. someone removed it), enqueue a fresh 'send' job.
+   */
+  async retry(userId: string, id: string) {
+    const msg = await this.prisma.message.findFirst({ where: { id, userId } });
+    if (!msg) throw new NotFoundException('Message not found');
+
+    if (msg.status !== 'FAILED') {
+      throw new BadRequestException('Only FAILED messages can be retried');
+    }
+
+    // Reset message row back to QUEUED and clear attempt timestamps/reason
+    await this.prisma.message.update({
+      where: { id },
+      data: {
+        status: 'QUEUED',
+        sendingAt: null,
+        sentAt: null,
+        deliveredAt: null,
+        readAt: null,
+        failedReason: null,
+      },
+    });
+
+    // Try to find the existing failed BullMQ job (jobId == message.id)
+    const existingJob = await this.messagesQueue.getJob(id);
+
+    if (existingJob) {
+      // If we still have the original job, retry it. This requeues it properly.
+      await existingJob.retry();
+      return { ok: true, retried: true };
+    } else {
+      // Otherwise, enqueue a brand-new send job (same jobId is fine now as none exists)
+      await this.messagesQueue.add(
+        'send',
+        { messageId: id, userId },
+        { jobId: id },
+      );
+      return { ok: true, retried: false, enqueued: true };
+    }
+  }
+
+  /**
+   * Cancel: remove pending delayed follow-up jobs (delivered/read) for a message.
+   * Note: We do not try to cancel an already running 'send' job here.
+   */
+  async cancel(userId: string, id: string) {
+    const msg = await this.prisma.message.findFirst({ where: { id, userId } });
+    if (!msg) throw new NotFoundException('Message not found');
+
+    // Remove delayed jobs for this message (names: delivered/read)
+    const delayed = await this.messagesQueue.getDelayed();
+    const toRemove = delayed.filter(
+      (j) =>
+        (j.name === 'delivered' || j.name === 'read') &&
+        j.data?.messageId === id,
+    );
+    for (const j of toRemove) {
+      await j.remove();
+    }
+
+    return { removed: toRemove.map((j) => ({ id: j.id, name: j.name })) };
   }
 }

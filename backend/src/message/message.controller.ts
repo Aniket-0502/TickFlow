@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Patch,
   Headers,
   Param,
   Post,
@@ -39,5 +40,16 @@ export class MessageController {
     @Query('limit') limit = '20',
   ) {
     return this.messageService.list(userId, Number(page), Number(limit));
+  }
+
+  @Patch(':id/retry')
+  retry(@Headers('x-user-id') userId: string, @Param('id') id: string) {
+    return this.messageService.retry(userId, id);
+  }
+
+  // Cancelling pending delivered/read follow-ups
+  @Patch(':id/cancel')
+  cancel(@Headers('x-user-id') userId: string, @Param('id') id: string) {
+    return this.messageService.cancel(userId, id);
   }
 }

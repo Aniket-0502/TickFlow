@@ -19,5 +19,23 @@ services:
     ports:
       - "6379:6379"
 
+  redisinsight:
+    image: redis/redisinsight:latest
+    container_name: tickflow_redisinsight
+    restart: unless-stopped
+    ports:
+      - "5540:5540"
+    environment:
+      RI_ACCEPT_TERMS_AND_CONDITIONS: "true"
+      RI_APP_PORT: "5540"
+      RI_REDIS_HOST: "redis"
+      RI_REDIS_PORT: "6379"
+      RI_REDIS_ALIAS: "TickFlow Redis"
+    depends_on:
+      - redis
+    volumes:
+      - redisinsight:/data
+
 volumes:
   pgdata:
+  redisinsight:
